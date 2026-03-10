@@ -1,131 +1,146 @@
-import os, json, requests, threading, http.server, socketserver
-import webbrowser, platform, time, shutil, zipfile
+import os, json, requests, threading, http.server, socketserver, webbrowser, platform, time, shutil, zipfile, io
+import tkinter as tk
+from tkinter import ttk, messagebox
 from pathlib import Path
 
-# --- REMOTE ASSETS ---
-HAR_URL = "https://raw.githubusercontent.com/JojoplayzMC/Minecraft-Classic-Offline/refs/heads/main/minecraft.har"
-ICON_URL = "https://raw.githubusercontent.com/JojoplayzMC/Minecraft-Classic-Offline/refs/heads/main/icon.png"
+# --- CONFIG & GITHUB LINKS ---
+GITHUB_USER = "JojoplayzMC"
+GITHUB_REPO = "Minecraft-Classic-Offline"
+HAR_URL = f"https://raw.githubusercontent.com{GITHUB_USER}/{GITHUB_REPO}/main/minecraft.har"
+ICON_URL = f"https://raw.githubusercontent.com{GITHUB_USER}/{GITHUB_REPO}/main/icon.png"
+MODS_API = f"https://api.github.com{GITHUB_USER}/{GITHUB_REPO}/contents/Mods"
 
-# --- CONFIG ---
 APP_NAME = "mcclassic"
 INSTALL_DIR = Path.home() / "Documents" / APP_NAME
-GAME_DIR = INSTALL_DIR / "game_files"
-MODS_DIR = INSTALL_DIR / "mods"
-BACKUP_DIR = INSTALL_DIR / "backup"
-HAR_FILE = INSTALL_DIR / "minecraft.har"
-ICON_FILE = INSTALL_DIR / "icon.png"
+GAME_DIR, MODS_DIR, BACKUP_DIR = INSTALL_DIR/"game_files", INSTALL_DIR/"mods", INSTALL_DIR/"backup"
+HAR_FILE, ICON_FILE = INSTALL_DIR/"minecraft.har", INSTALL_DIR/"icon.png"
 PORT = 8000
 
-# Ensure directories exist
-for d in [INSTALL_DIR, GAME_DIR, MODS_DIR, BACKUP_DIR]:
-    os.makedirs(d, exist_ok=True)
+for d in [INSTALL_DIR, GAME_DIR, MODS_DIR, BACKUP_DIR]: os.makedirs(d, exist_ok=True)
 
-def bootstrap():
-    """Downloads necessary bootstrap files if missing."""
-    print("📦 Checking core files...")
-    for url, target in [(HAR_URL, HAR_FILE), (ICON_URL, ICON_FILE)]:
-        if not target.exists():
-            print(f"⬇️ Downloading bootstrap: {target.name}...")
-            r = requests.get(url)
-            with open(target, "wb") as f: f.write(r.content)
+class MCLauncher(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("MC Classic Mod Launcher")
+        self.geometry("450x550")
+        self.bootstrap()
+        self.setup_ui()
 
-def create_launcher_icon():
-    """Creates OS-specific shortcut pointing to the Documents installation."""
-    system = platform.system()
-    desktop = Path.home() / "Desktop"
-    script_path = INSTALL_DIR / "mcclassic.py"
-    
-    if system == "Linux":
-        launcher_path = desktop / f"{APP_NAME}.desktop"
-        if not launcher_path.exists():
-            content = f"[Desktop Entry]\nName={APP_NAME}\nExec=python3 \"{script_path}\"\nPath={INSTALL_DIR}\nIcon={ICON_FILE}\nTerminal=true\nType=Application\nCategories=Game;"
-            with open(launcher_path, "w") as f: f.write(content)
-            os.chmod(launcher_path, 0o755)
-    elif system == "Windows":
-        launcher_path = desktop / f"{APP_NAME}.bat"
-        if not launcher_path.exists():
-            with open(launcher_path, "w") as f: 
-                f.write(f'@echo off\ncd /d "{INSTALL_DIR}"\npython "{script_path}"\npause')
+    def bootstrap(self):
+        """Initial self-install and file fetch."""
+        print("📦 Bootstrapping...")
+        for url, target in [(HAR_URL, HAR_FILE), (ICON_URL, ICON_FILE)]:
+            if not target.exists():
+                r = requests.get(url)
+                with open(target, "wb") as f: f.write(r.content)
+        
+        # Self-copy to Documents
+        this_script = Path(__file__).resolve()
+        if this_script != (INSTALL_DIR / "mcclassic.py"):
+            shutil.copy2(this_script, INSTALL_DIR / "mcclassic.py")
 
-def apply_mod(zip_path):
-    """Extracts mod and backups originals."""
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            with zip_ref.open('Manifest.json') as f:
+    def setup_ui(self):
+        # Header
+        ttk.Label(self, text="Minecraft Classic Launcher", font=("Arial", 16, "bold")).pack(pady=10)
+        
+        # Mod List (Scrollable)
+        self.canvas = tk.Canvas(self)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scroll_frame = ttk.Frame(self.canvas)
+        
+        self.scroll_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        self.canvas.pack(side="left", fill="both", expand=True, padx=10)
+        self.scrollbar.pack(side="right", fill="y")
+
+        # Bottom Buttons
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill="x", pady=10)
+        ttk.Button(btn_frame, text="🚀 Launch Vanilla", command=self.launch_game).pack(side="left", padx=5, expand=True)
+        ttk.Button(btn_frame, text="♻️ Reset Vanilla", command=self.reset_game).pack(side="left", padx=5, expand=True)
+        ttk.Button(btn_frame, text="🔗 Install from URL", command=self.prompt_mod_url).pack(side="left", padx=5, expand=True)
+
+        self.refresh_mods()
+
+    def refresh_mods(self):
+        """Fetches 'Official' mods from GitHub subfolders."""
+        for widget in self.scroll_frame.winfo_children(): widget.destroy()
+        try:
+            r = requests.get(MODS_API)
+            if r.status_code == 200:
+                for item in r.json():
+                    if item['type'] == 'dir':
+                        btn = ttk.Button(self.scroll_frame, text=f"📥 Install: {item['name']}", 
+                                         command=lambda u=item['html_url']: self.install_mod(u))
+                        btn.pack(fill="x", pady=2)
+        except: ttk.Label(self.scroll_frame, text="Offline: Couldn't reach GitHub Mods").pack()
+
+    def install_mod(self, url):
+        """Downloads a folder as a ZIP and applies it."""
+        print(f"🛠️ Downloading mod from {url}...")
+        # GitHub Zipball API converts folders to Zips
+        # Format: https://github.com
+        # For folders, we rely on the manifest inside the repo zip.
+        r = requests.get(f"https://codeload.github.com/{GITHUB_USER}/{GITHUB_REPO}/zip/refs/heads/main")
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            # Logic: Find the Manifest.json inside the specific folder path
+            mod_folder_name = url.split('/')[-1]
+            mod_root = f"{GITHUB_REPO}-main/Mods/{mod_folder_name}/"
+            
+            with z.open(f"{mod_root}Manifest.json") as f:
                 manifest = json.load(f)
-            print(f"🛠️ Applying Mod: {manifest.get('name', 'Unknown')}")
+            
             for mod_file, game_path in manifest['files'].items():
                 target = GAME_DIR / game_path.replace("/", os.sep)
                 backup = BACKUP_DIR / game_path.replace("/", os.sep)
                 if target.exists() and not backup.exists():
                     os.makedirs(backup.parent, exist_ok=True)
                     shutil.copy2(target, backup)
+                
                 os.makedirs(target.parent, exist_ok=True)
-                with open(target, "wb") as f_out: f_out.write(zip_ref.read(mod_file))
-            print("✅ Mod applied!")
-    except Exception as e: print(f"❌ Mod Error: {e}")
+                with open(target, "wb") as f_out:
+                    f_out.write(z.read(f"{mod_root}{mod_file}"))
+        messagebox.showinfo("Success", f"Mod applied! Restarting server...")
 
-def restore_originals():
-    """Reverts game to vanilla using backup folder."""
-    if not BACKUP_DIR.exists(): return
-    print("♻️ Restoring vanilla files...")
-    for backup_path in BACKUP_DIR.rglob('*'):
-        if backup_path.is_file():
-            rel_path = backup_path.relative_to(BACKUP_DIR)
-            shutil.copy2(backup_path, GAME_DIR / rel_path)
-    print("✅ Vanilla restored.")
+    def reset_game(self):
+        if BACKUP_DIR.exists():
+            for b_file in BACKUP_DIR.rglob('*'):
+                if b_file.is_file():
+                    rel = b_file.relative_to(BACKUP_DIR)
+                    shutil.copy2(b_file, GAME_DIR / rel)
+            messagebox.showinfo("Reset", "Back to vanilla!")
 
-def download_game_assets():
-    """Downloads game files based on the HAR log."""
-    with open(HAR_FILE, 'r') as f:
-        har_data = json.load(f)
-    print("🌍 Syncing game assets (this may take a moment)...")
-    for entry in har_data['log']['entries']:
-        url = entry['request']['url']
-        if "classic.minecraft.net" in url:
-            path_part = url.split("classic.minecraft.net")[-1].split('?')[0].lstrip('/')
-            if not path_part: path_part = "index.html"
-            local_path = GAME_DIR / path_part.replace("/", os.sep)
-            if not local_path.exists():
-                os.makedirs(local_path.parent, exist_ok=True)
-                r = requests.get(url)
-                if r.status_code == 200:
-                    with open(local_path, 'wb') as f_out: f_out.write(r.content)
-    return True
+    def prompt_mod_url(self):
+        # Placeholder for a simple entry dialog
+        url = tk.simpledialog.askstring("Mod URL", "Paste GitHub Folder URL:")
+        if url: self.install_mod(url)
+
+    def launch_game(self):
+        self.download_assets()
+        threading.Thread(target=self.run_server, daemon=True).start()
+        time.sleep(1)
+        webbrowser.open(f"http://localhost:{PORT}")
+
+    def download_assets(self):
+        with open(HAR_FILE, 'r') as f: har_data = json.load(f)
+        for entry in har_data['log']['entries']:
+            url = entry['request']['url']
+            if "classic.minecraft.net" in url:
+                path = url.split("classic.minecraft.net")[-1].split('?').lstrip('/')
+                local = GAME_DIR / (path or "index.html").replace("/", os.sep)
+                if not local.exists():
+                    os.makedirs(local.parent, exist_ok=True)
+                    r = requests.get(url)
+                    with open(local, "wb") as f_out: f_out.write(r.content)
+
+    def run_server(self):
+        os.chdir(GAME_DIR)
+        socketserver.TCPServer.allow_reuse_address = True
+        with socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler) as httpd:
+            httpd.serve_forever()
 
 if __name__ == "__main__":
-    # 1. Self-Install
-    this_script = Path(__file__).resolve()
-    target_script = INSTALL_DIR / "mcclassic.py"
-    if this_script != target_script:
-        shutil.copy2(this_script, target_script)
-    
-    # 2. Setup Files
-    bootstrap()
-    create_launcher_icon()
-    
-    # 3. Mod Menu
-    print(f"\n--- {APP_NAME.upper()} LAUNCHER ---")
-    print("1. Launch Vanilla")
-    print("2. Install Mod (URL)")
-    print("3. Reset to Vanilla")
-    choice = input("Choice: ")
-
-    if choice == "2":
-        url = input("ZIP URL: ")
-        r = requests.get(url); zip_p = MODS_DIR / "temp.zip"
-        with open(zip_p, "wb") as f: f.write(r.content)
-        apply_mod(zip_p)
-    elif choice == "3":
-        restore_originals()
-
-    # 4. Run Game
-    if download_game_assets():
-        os.chdir(GAME_DIR)
-        threading.Thread(target=lambda: socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler).serve_forever(), daemon=True).start()
-        print(f"🚀 Running at http://localhost:{PORT}")
-        time.sleep(1); webbrowser.open(f"http://localhost:{PORT}")
-        try:
-            while True: time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nShutting down...")
+    app = MCLauncher()
+    app.mainloop()
